@@ -161,7 +161,7 @@ def kernighan_lin_partition(graph, adoption_rate):
         while len(partition) < parts:
             new_partition = []
             for part in partition:
-                new_partition.extend(list(nx.community.kernighan_lin.kernighan_lin_bisection(graph.subgraph(part))))
+                new_partition.extend(list(nx.community.kernighan_lin_bisection(graph.subgraph(part))))
             partition = new_partition
 
         if last is None and parts > 2:
