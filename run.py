@@ -69,7 +69,7 @@ def worker_init(gpu_queue, analysis_graph, stripped_graph):
     WORKER_BASE_R_MATRIX.run(
         max_iter=32,
         save_next_hop=True,
-        backend="gpu",
+        backend="torch",
         device=f"cuda:{GPU_ID}"
     )
 
