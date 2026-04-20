@@ -34,7 +34,7 @@ CONE_SIZES = {}
 def compute_cone_sizes(graph):
     global CONE_SIZES
     if CONE_SIZES:
-        return
+        return CONE_SIZES
 
     cones = {}
 
