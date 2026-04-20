@@ -135,9 +135,9 @@ def compute_impact(rel_file: str = None):
     directed_graph = create_graph(directed=True, edge_file=rel_file)
     directed_graph.remove_nodes_from([node for node in directed_graph.nodes if directed_graph.nodes[node]["type"] == "edge"])
     
-    compute_graph_metadata(analysis_graph)
+    compute_graph_metadata(stripped_graph)
     
-    deployments = get_deployments(analysis_graph)
+    deployments = get_deployments(stripped_graph, directed_graph)
     attacks = get_attacks()
     
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
@@ -168,8 +168,8 @@ def compute_impact(rel_file: str = None):
     return pd.DataFrame(all_results)
 
 
-def get_deployments(analysis_graph):
-    TOP_100 = top_100(analysis_graph, None)
+def get_deployments(analysis_graph, directed_graph):
+    TOP_100 = top_100(directed_graph, None)
 
     methods = [
         random_choice, 
@@ -213,7 +213,7 @@ def get_deployments(analysis_graph):
                 for dropout in dropouts:
                     pkl_path = os.path.join(ROOT_DIR, "deployments", f"{method.__name__}_{adoption_rate}_{dropout}.pkl")
                     if not os.path.exists(pkl_path):
-                        deployment = method(analysis_graph, adoption_rate)
+                        deployment = method(directed_graph, adoption_rate)
                         stripped_deployment = set(deployment) - set(random.sample(TOP_100, dropout))
                         pickle.dump(stripped_deployment, open(pkl_path, "wb"))
                     
