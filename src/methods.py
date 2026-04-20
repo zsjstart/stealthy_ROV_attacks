@@ -24,7 +24,7 @@ def compute_cone(node, cones, graph):
         if neighbor in cones:
             cone |= cones[neighbor]
         else:
-            cone |= compute_cone(neighbor, cones)
+            cone |= compute_cone(neighbor, cones, graph)
 
     cones[node] = cone
     return cone
