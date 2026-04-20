@@ -3,6 +3,9 @@ import pickle
 import networkx as nx
 import pandas as pd 
 import numpy as np
+import torch
+import multiprocessing as mp
+
 from matrix_bgpsim import RMatrix
 
 from src.methods import *
@@ -114,18 +117,18 @@ def worker_task(deployment_info):
             "mode": "real_hijack" if real else "fake_hijack"
         }, open(f"results/{method.__name__}_{adoption_rate}_{dropout}_{attacker}_{victim}.json", "w"))
 
-def compute_impact(deployments: list):
-    import torch
-    import multiprocessing as mp
 
-    analysis_graph = create_graph(directed=False)
+def compute_impact(rel_file: str = "network-graph-data/as-rel.txt"):
+    analysis_graph = create_graph(directed=False, edge_file=rel_file)
     stripped_graph = analysis_graph.copy()
     stripped_graph.remove_nodes_from([node for node in stripped_graph.nodes if stripped_graph.nodes[node]["type"] == "edge"])
     
-    directed_graph = create_graph(directed=True)
+    directed_graph = create_graph(directed=True, edge_file=rel_file)
     directed_graph.remove_nodes_from([node for node in directed_graph.nodes if directed_graph.nodes[node]["type"] == "edge"])
     
     compute_graph_metadata(analysis_graph)
+    
+    deployments = get_deployments(analysis_graph)
     attacks = get_attacks()
     
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
@@ -156,11 +159,7 @@ def compute_impact(deployments: list):
     return pd.DataFrame(all_results)
 
 
-def get_deployments():
-    analysis_graph = create_graph(directed=False)
-    analysis_graph.remove_nodes_from([node for node in analysis_graph.nodes if analysis_graph.nodes[node]["type"] == "edge"])
-    compute_graph_metadata(analysis_graph)
-
+def get_deployments(analysis_graph):
     TOP_100 = top_100(analysis_graph, None)
 
     methods = [

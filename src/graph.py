@@ -1,12 +1,6 @@
-import json
-import pickle
-
 import networkx as nx
-from collections import deque
 
-TIER_1 = set(str(x) for x in pickle.load(open("./network-graph-data/asns_input_clique_asns.pkl", "rb")))
-TRANSIT = set(str(x) for x in pickle.load(open("./network-graph-data/asns_etc_asns.pkl", "rb")))
-EDGE = set(str(x) for x in pickle.load(open("./network-graph-data/asns_stub_or_mh_asns.pkl", "rb")))
+from collections import deque
 
 
 # Step 1: Read AS relationships data
@@ -28,16 +22,17 @@ def parse_as_relationships(file_path):
 
 
 def compute_graph_metadata(graph):
+    has_customers = set()
+    for u, v, data in graph.edges(data=True):
+        if data.get("relationship") == -1:
+            has_customers.add(u)
+
     for node in graph.nodes:
         graph.nodes[node]["ROV"] = 0
-        if node in TIER_1:
-            graph.nodes[node]["type"] = "tier-1"
-        elif node in TRANSIT:
+        if node in has_customers:
             graph.nodes[node]["type"] = "transit"
-        elif node in EDGE:
-            graph.nodes[node]["type"] = "edge"
         else:
-            print("Strange")
+            graph.nodes[node]["type"] = "edge"
 
     nx.set_node_attributes(graph, nx.degree_centrality(graph), "degree")
     nx.set_node_attributes(graph, nx.eigenvector_centrality(graph), "eigenvector")
@@ -48,7 +43,6 @@ def create_graph(
         infos: object = {}, 
         directed: bool = False, 
         special: bool = False,
-
     ):
     
     edges, _ = parse_as_relationships(edge_file)
