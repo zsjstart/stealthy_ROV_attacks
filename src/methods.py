@@ -1,5 +1,6 @@
 import json
 import random
+import requests
 import numpy as np
 import pandas as pd
 import networkx as nx
@@ -9,7 +10,7 @@ from .graph import create_graph
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def compute_cone(node, cones):
+def compute_cone(node, cones, graph):
     neighbors = graph.successors(node)
     neighbors = [n for n in neighbors if graph.get_edge_data(node, n).get("relationship") == -1]
     
@@ -28,27 +29,27 @@ def compute_cone(node, cones):
     cones[node] = cone
     return cone
 
-
-graph = create_graph(directed=True)
-graph.remove_nodes_from([node for node in graph.nodes if graph.nodes[node].get("type") == "edge"])
-
-cones = {}
-
-for node in graph.nodes:
-    compute_cone(node, cones)
-
-
 CONE_SIZES = {}
 
-for key in cones:
-    CONE_SIZES[key] = len(cones[key])
+def compute_cone_sizes(graph):
+    global CONE_SIZES
+    if CONE_SIZES:
+        return
 
+    cones = {}
 
-import requests
+    for node in graph.nodes:
+        compute_cone(node, cones, graph)
+
+    for key in cones:
+        CONE_SIZES[key] = len(cones[key])
+
+    return CONE_SIZES
 
 
 def top_100(graph, rate):
-    return sorted(graph.nodes, key=lambda x: CONE_SIZES[x], reverse=True)[:100]
+    cone_sizes = compute_cone_sizes(graph)
+    return sorted(graph.nodes, key=lambda x: cone_sizes[x], reverse=True)[:100]
 
 
 def real_world(graph, rate):
@@ -76,8 +77,9 @@ def real_world(graph, rate):
 
 def cone_size(graph, adoption_rate):
     n = round(adoption_rate * len(graph.nodes))
+    cone_sizes = compute_cone_sizes(graph)
 
-    sorted_nodes = sorted(list(graph.nodes), key=lambda x: CONE_SIZES[x], reverse=True)
+    sorted_nodes = sorted(list(graph.nodes), key=lambda x: cone_sizes[x], reverse=True)
     
     return sorted_nodes[0:n]
 
