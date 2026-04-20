@@ -88,7 +88,6 @@ def worker_task(deployment_info):
         device=f"cuda:{GPU_ID}"
     )
     
-    results = []
     num_nodes = len(WORKER_STRIPPED_GRAPH.nodes)
     
     for attacker, victim, _, real in attacks:
@@ -100,7 +99,7 @@ def worker_task(deployment_info):
             victim
         )
 
-        results.append({
+        json.dump({
             "adoption_rate": adoption_rate,
             "dropout": dropout,
             "impact": impact / num_nodes,
@@ -113,10 +112,7 @@ def worker_task(deployment_info):
             "max_component": max(component_lengths),
             "average_component": np.mean(component_lengths),
             "mode": "real_hijack" if real else "fake_hijack"
-        })
-
-    return results
-
+        }, open(f"results/{method.__name__}_{adoption_rate}_{dropout}_{attacker}_{victim}.json", "w"))
 
 def compute_impact(deployments: list):
     import torch
