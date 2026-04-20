@@ -3,7 +3,10 @@ import random
 import numpy as np
 import pandas as pd
 import networkx as nx
+import os
 from .graph import create_graph
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def compute_cone(node, cones):
@@ -327,7 +330,7 @@ def louvain_communities(graph, adoption_rate):
 def node_betweenness(graph, adoption_rate):
     n = round(adoption_rate * len(graph.nodes))
 
-    counts = json.load(open("results/reachable_nodes_count.json", "r"))
+    counts = json.load(open(os.path.join(ROOT_DIR, "results", "reachable_nodes_count.json"), "r"))
     sorted_nodes = sorted(graph.nodes, key=lambda x: counts[str(x)] if str(x) in counts else 0, reverse=True)
 
     return sorted_nodes[:n]

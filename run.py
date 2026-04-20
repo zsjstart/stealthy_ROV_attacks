@@ -1,19 +1,26 @@
 import os
+import sys
+
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+if ROOT_DIR not in sys.path:
+    sys.path.append(ROOT_DIR)
+
 import pickle
 import networkx as nx
 import pandas as pd 
 import numpy as np
 import torch
 import multiprocessing as mp
+import json
 
 from matrix_bgpsim import RMatrix
 
 from src.methods import *
-from src.graph import create_graph, compute_graph_metadata, calculate_impact, TRANSIT
+from src.graph import create_graph, compute_graph_metadata, calculate_impact
 
 
 def get_attacks():
-    attack_df = pd.read_csv("network-graph-data/LLM_real_hijacks_new.csv")
+    attack_df = pd.read_csv(os.path.join(ROOT_DIR, "network-graph-data", "LLM_real_hijacks_new.csv"))
     attacks = []
 
     for idx, row in attack_df.iterrows():
@@ -56,7 +63,7 @@ def worker_init(gpu_queue, analysis_graph, stripped_graph):
     WORKER_STRIPPED_GRAPH = stripped_graph
     
     WORKER_BASE_R_MATRIX = RMatrix(
-        input_rels="network-graph-data/as-rel.txt",
+        input_rels=os.path.join(ROOT_DIR, "network-graph-data", "as-rel.txt"),
         excluded=set(analysis_graph.nodes()) - set(stripped_graph.nodes())
     )
     WORKER_BASE_R_MATRIX.run(
@@ -70,7 +77,7 @@ def worker_init(gpu_queue, analysis_graph, stripped_graph):
 def worker_task(deployment_info):
     method, adoption_rate, dropout, attacks = deployment_info
     
-    pkl_path = f"deployments/{method.__name__}_{adoption_rate}_{dropout}.pkl"
+    pkl_path = os.path.join(ROOT_DIR, "deployments", f"{method.__name__}_{adoption_rate}_{dropout}.pkl")
     with open(pkl_path, "rb") as f:
         deployment_nodes = pickle.load(f)
 
@@ -81,7 +88,7 @@ def worker_task(deployment_info):
     component_lengths = list(map(len, components))
 
     deployment_r_matrix = RMatrix(
-        input_rels="network-graph-data/as-rel.txt", 
+        input_rels=os.path.join(ROOT_DIR, "network-graph-data", "as-rel.txt"), 
         excluded=set(WORKER_ANALYSIS_GRAPH.nodes()) - set(WORKER_STRIPPED_GRAPH.nodes()) - set(deployment_nodes)
     )
     deployment_r_matrix.run(
@@ -115,10 +122,12 @@ def worker_task(deployment_info):
             "max_component": max(component_lengths),
             "average_component": np.mean(component_lengths),
             "mode": "real_hijack" if real else "fake_hijack"
-        }, open(f"results/{method.__name__}_{adoption_rate}_{dropout}_{attacker}_{victim}.json", "w"))
+        }, open(os.path.join(ROOT_DIR, "results", f"{method.__name__}_{adoption_rate}_{dropout}_{attacker}_{victim}.json"), "w"))
 
 
-def compute_impact(rel_file: str = "network-graph-data/as-rel.txt"):
+def compute_impact(rel_file: str = None):
+    if rel_file is None:
+        rel_file = os.path.join(ROOT_DIR, "network-graph-data", "as-rel.txt")
     analysis_graph = create_graph(directed=False, edge_file=rel_file)
     stripped_graph = analysis_graph.copy()
     stripped_graph.remove_nodes_from([node for node in stripped_graph.nodes if stripped_graph.nodes[node]["type"] == "edge"])
@@ -202,10 +211,11 @@ def get_deployments(analysis_graph):
         for adoption_rate in adoption_rates:
             if method.__name__ == "cone_size":
                 for dropout in dropouts:
-                    if not os.path.exists(f"deployments/{method.__name__}_{adoption_rate}_{dropout}.pkl"):
+                    pkl_path = os.path.join(ROOT_DIR, "deployments", f"{method.__name__}_{adoption_rate}_{dropout}.pkl")
+                    if not os.path.exists(pkl_path):
                         deployment = method(analysis_graph, adoption_rate)
                         stripped_deployment = set(deployment) - set(random.sample(TOP_100, dropout))
-                        pickle.dump(stripped_deployment, open(f"deployments/{method.__name__}_{adoption_rate}_{dropout}.pkl", "wb"))
+                        pickle.dump(stripped_deployment, open(pkl_path, "wb"))
                     
                     deployments.append([
                         method,
@@ -213,9 +223,10 @@ def get_deployments(analysis_graph):
                         dropout
                     ])
             else:
-                if not os.path.exists(f"deployments/{method.__name__}_{adoption_rate}_0.pkl"):
+                pkl_path = os.path.join(ROOT_DIR, "deployments", f"{method.__name__}_{adoption_rate}_0.pkl")
+                if not os.path.exists(pkl_path):
                     deployment = method(analysis_graph, adoption_rate)
-                    pickle.dump(deployment, open(f"deployments/{method.__name__}_{adoption_rate}_0.pkl", "wb"))
+                    pickle.dump(deployment, open(pkl_path, "wb"))
 
                 deployments.append([
                     method,

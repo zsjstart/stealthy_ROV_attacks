@@ -1,6 +1,9 @@
 import networkx as nx
 
 from collections import deque
+import os
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # Step 1: Read AS relationships data
@@ -39,12 +42,15 @@ def compute_graph_metadata(graph):
 
 
 def create_graph(
-        edge_file: str = "./network-graph-data/cached.txt", 
+        edge_file: str = None, 
         infos: object = {}, 
         directed: bool = False, 
         special: bool = False,
     ):
     
+    if edge_file is None:
+        edge_file = os.path.join(ROOT_DIR, "network-graph-data", "cached.txt")
+        
     edges, _ = parse_as_relationships(edge_file)
     """Create a filtered graph based on specific AS paths."""
     if directed or special:
