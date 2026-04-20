@@ -1,69 +1,175 @@
+import os
 import pickle
-import multiprocessing
+import networkx as nx
 import pandas as pd 
 import numpy as np
+from matrix_bgpsim import RMatrix
 
-from src.simulation import sim
 from src.methods import *
 from src.graph import create_graph, compute_graph_metadata, calculate_impact, TRANSIT
 
 
-def compute_impact(args):
-    analysis_graph, directed_graph, method, adoption_rate, attacker, victim, dropout = args
+def get_attacks():
+    attack_df = pd.read_csv("network-graph-data/LLM_real_hijacks_new.csv")
+    attacks = []
 
-    stripped_graph = analysis_graph.copy()
-    stripped_graph.remove_nodes_from([node for node in analysis_graph.nodes if analysis_graph.nodes[node]["type"] == "edge"])
+    for idx, row in attack_df.iterrows():
+        attacks.append((row["unexpected_origin"].replace("AS", ""), row["expected_origin"].replace("AS", ""), row["prefix"], True))
+    
+    return attacks
 
-    deployment = method(stripped_graph, adoption_rate)
-    stripped_deployment = set(deployment) - set(random.sample(TOP_100, dropout))
-            
-    pickle.dump(stripped_deployment, open(f"deployments/{method.__name__}_{adoption_rate}_{dropout}.pkl", "wb"))
-    component_graph = analysis_graph.copy()
-    component_graph.remove_nodes_from(stripped_deployment)
+
+def calculate_impact(
+    stripped_graph: nx.Graph,
+    base_r_matrix: RMatrix, 
+    deployment_r_matrix: RMatrix, 
+    attacker: int, 
+    victim: int 
+):
+    directly_affected = set()
+
+    for node in stripped_graph.nodes():
+        if deployment_r_matrix.get_path(attacker, node):
+            directly_affected.add(node)
+    
+    indirectly_affected = set()
+
+    for node in stripped_graph.nodes():
+        path = base_r_matrix.get_path(node, victim)
+        if not path: continue
+
+        for path_node in path:
+            if path_node in directly_affected:
+                indirectly_affected.add(node)
+                break
+
+    return len(directly_affected) + len(indirectly_affected), len(directly_affected), len(indirectly_affected)
+
+
+def worker_init(gpu_queue, analysis_graph, stripped_graph):
+    global GPU_ID, WORKER_BASE_R_MATRIX, WORKER_ANALYSIS_GRAPH, WORKER_STRIPPED_GRAPH
+    GPU_ID = gpu_queue.get()
+    WORKER_ANALYSIS_GRAPH = analysis_graph
+    WORKER_STRIPPED_GRAPH = stripped_graph
+    
+    WORKER_BASE_R_MATRIX = RMatrix(
+        input_rels="network-graph-data/as-rel.txt",
+        excluded=set(analysis_graph.nodes()) - set(stripped_graph.nodes())
+    )
+    WORKER_BASE_R_MATRIX.run(
+        max_iter=32,
+        save_next_hop=True,
+        backend="gpu",
+        device=f"cuda:{GPU_ID}"
+    )
+
+
+def worker_task(deployment_info):
+    method, adoption_rate, dropout, attacks = deployment_info
+    
+    pkl_path = f"deployments/{method.__name__}_{adoption_rate}_{dropout}.pkl"
+    with open(pkl_path, "rb") as f:
+        deployment_nodes = pickle.load(f)
+
+    component_graph = WORKER_ANALYSIS_GRAPH.copy()
+    component_graph.remove_nodes_from(deployment_nodes)
 
     components = list(nx.connected_components(component_graph))
     component_lengths = list(map(len, components))
 
-    deployed_graph = directed_graph.copy()
-    for node in stripped_deployment:
-        deployed_graph.nodes[node]["ROV"] = 1
-        
-    impact, direct_impact, indirect_impact = calculate_impact(deployed_graph, attacker, victim)
-    impact_vf, direct_impact_vf, indirect_impact_vf = calculate_impact(deployed_graph, attacker, victim, valley_free_routing=False)
+    deployment_r_matrix = RMatrix(
+        input_rels="network-graph-data/as-rel.txt", 
+        excluded=set(WORKER_ANALYSIS_GRAPH.nodes()) - set(WORKER_STRIPPED_GRAPH.nodes()) - set(deployment_nodes)
+    )
+    deployment_r_matrix.run(
+        max_iter=32,        
+        save_next_hop=True, 
+        backend="gpu",    
+        device=f"cuda:{GPU_ID}"
+    )
+    
+    results = []
+    num_nodes = len(WORKER_STRIPPED_GRAPH.nodes)
+    
+    for attacker, victim, _, real in attacks:
+        impact, direct_impact, indirect_impact = calculate_impact(
+            WORKER_STRIPPED_GRAPH,
+            WORKER_BASE_R_MATRIX,
+            deployment_r_matrix,
+            attacker,
+            victim
+        )
 
-    sim_infos = sim(adoption_rate=adoption_rate, deployment=stripped_deployment, attacker=attacker, victim=victim)
-    return {
-        "sim_infos": sim_infos,
-        "adoption_rate": adoption_rate,
-        "dropout": dropout,
-        "impact": impact / len(deployed_graph.nodes),
-        "direct_impact": direct_impact / len(deployed_graph.nodes),
-        "indirect_impact": indirect_impact / len(deployed_graph.nodes),
-        "impact_vf": impact_vf / len(deployed_graph.nodes),
-        "direct_impact_vf": direct_impact_vf / len(deployed_graph.nodes),
-        "indirect_impact_vf": indirect_impact_vf / len(deployed_graph.nodes),
-        "method": method.__name__,
-        "attacker": attacker,
-        "number_of_components": len(components),
-        "max_component": max(component_lengths),
-        "average_component": np.mean(component_lengths),
-        "victim": victim,
-        "mode": "random_transit_attacker_victim"
-    }
+        results.append({
+            "adoption_rate": adoption_rate,
+            "dropout": dropout,
+            "impact": impact / num_nodes,
+            "direct_impact": direct_impact / num_nodes,
+            "indirect_impact": indirect_impact / num_nodes,
+            "method": method.__name__,
+            "attacker": attacker,
+            "victim": victim,
+            "number_of_components": len(components),
+            "max_component": max(component_lengths),
+            "average_component": np.mean(component_lengths),
+            "mode": "real_hijack" if real else "fake_hijack"
+        })
+
+    return results
 
 
+def compute_impact(deployments: list):
+    import torch
+    import multiprocessing as mp
 
-if __name__ == "__main__":
     analysis_graph = create_graph(directed=False)
+    stripped_graph = analysis_graph.copy()
+    stripped_graph.remove_nodes_from([node for node in stripped_graph.nodes if stripped_graph.nodes[node]["type"] == "edge"])
+    
     directed_graph = create_graph(directed=True)
+    directed_graph.remove_nodes_from([node for node in directed_graph.nodes if directed_graph.nodes[node]["type"] == "edge"])
+    
+    compute_graph_metadata(analysis_graph)
+    attacks = get_attacks()
+    
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if num_gpus == 0:
+        num_gpus = 1 # Fallback to 1 if no GPUs detected, but backend is still specified as 'gpu'
+        
+    ctx = mp.get_context('spawn')
+    m = ctx.Manager()
+    gpu_queue = m.Queue()
+    for i in range(num_gpus):
+        gpu_queue.put(i)
+        
+    tasks = []
+    for deployment in deployments:
+        method, adoption_rate, dropout = deployment
+        tasks.append((method, adoption_rate, dropout, attacks))
+        
+    all_results = []
+    
+    with ctx.Pool(
+        processes=num_gpus, 
+        initializer=worker_init, 
+        initargs=(gpu_queue, analysis_graph, stripped_graph)
+    ) as pool:
+        for res_list in pool.map(worker_task, tasks):
+            all_results.extend(res_list)
+            
+    return pd.DataFrame(all_results)
+
+
+def get_deployments():
+    analysis_graph = create_graph(directed=False)
+    analysis_graph.remove_nodes_from([node for node in analysis_graph.nodes if analysis_graph.nodes[node]["type"] == "edge"])
     compute_graph_metadata(analysis_graph)
 
-    TOP_100 = set(top_100(analysis_graph, None))
+    TOP_100 = top_100(analysis_graph, None)
 
     methods = [
         random_choice, 
         cone_size,
-        node_betweenness,
         degree_centrality, 
         louvain_communities,
         kernighan_lin_partition
@@ -82,52 +188,44 @@ if __name__ == "__main__":
         0.9
     ]
 
-    transit = [node for node in graph.nodes if graph.nodes[node]["type"] == "transit"]
-    attackers_victims = zip(random.sample(TRANSIT, 1000), random.sample(TRANSIT, 1000))
-
     dropouts = [
-        0.0,
-        0.1,
-        0.2,
-        0.3,
-        0.4,
-        0.5,
-        0.6,
-        0.7,
-        0.8,
-        0.9
+        0,
+        10,
+        20,
+        30,
+        40,
+        50,
+        60,
+        70,
+        80,
+        90
     ]
 
-    args = []
+    deployments = []
 
     for method in methods:
         for adoption_rate in adoption_rates:
-            for attacker, victim in attackers_victims:
-                if method.__name__ == "cone_size":
-                    for dropout in dropouts:
-                        args.append([
-                            analysis_graph,
-                            directed_graph,
-                            method,
-                            adoption_rate,
-                            attacker,
-                            victim,
-                            dropout
-                        ])
-                else:
-                    args.append([
-                        analysis_graph,
-                        directed_graph,
+            if method.__name__ == "cone_size":
+                for dropout in dropouts:
+                    if not os.path.exists(f"deployments/{method.__name__}_{adoption_rate}_{dropout}.pkl"):
+                        deployment = method(analysis_graph, adoption_rate)
+                        stripped_deployment = set(deployment) - set(random.sample(TOP_100, dropout))
+                        pickle.dump(stripped_deployment, open(f"deployments/{method.__name__}_{adoption_rate}_{dropout}.pkl", "wb"))
+                    
+                    deployments.append([
                         method,
                         adoption_rate,
-                        attacker,
-                        victim,
-                        0
+                        dropout
                     ])
+            else:
+                if not os.path.exists(f"deployments/{method.__name__}_{adoption_rate}_0.pkl"):
+                    deployment = method(analysis_graph, adoption_rate)
+                    pickle.dump(deployment, open(f"deployments/{method.__name__}_{adoption_rate}_0.pkl", "wb"))
 
-    print("Lets go!s")
-    with multiprocessing.Pool() as pool:
-        impacts = pool.map(compute_impact, args)
+                deployments.append([
+                    method,
+                    adoption_rate,
+                    0
+                ])
 
-    df = pd.DataFrame(impacts)
-    df.to_csv("results/impacts.csv", index=False)
+    return deployments

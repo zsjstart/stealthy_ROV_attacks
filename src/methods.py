@@ -27,7 +27,7 @@ def compute_cone(node, cones):
 
 
 graph = create_graph(directed=True)
-graph.remove_nodes_from([node for node in graph.nodes if graph.nodes[node] == "edge"])
+graph.remove_nodes_from([node for node in graph.nodes if graph.nodes[node].get("type") == "edge"])
 
 cones = {}
 
@@ -271,7 +271,7 @@ def louvain_communities(graph, adoption_rate):
 
     while current_partition:
         subset_df = subset_df[(subset_df.inner_boundary_length < (n - len(current_boundary))) | (subset_df.outer_boundary_length < (n - len(current_boundary)))]
-        for idx, row in subset_df[(subset_df.inner_boundary == 0) | (subset_df.outer_boundary == 0)].iterrows():
+        for idx, row in subset_df[(subset_df.inner_boundary_length == 0) | (subset_df.outer_boundary_length == 0)].iterrows():
             current_partition.append(row["subset"])
             current_partition[[row["subset"] <= x for x in current_partition].index(True)] -= row["subset"]
             subset_df.drop(idx, axis=0, inplace=True)

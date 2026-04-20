@@ -4,10 +4,9 @@ import pickle
 import networkx as nx
 from collections import deque
 
-TIER_1 = pickle.load(open("./data/network-graph-data/asns_input_clique_asns.pkl", "rb"))
-TRANSIT = pickle.load(open("./data/network-graph-data/asns_etc_asns.pkl", "rb"))
-EDGE = pickle.load(open("./data/network-graph-data/asns_stub_or_mh_asns.pkl", "rb"))
-LEVELS = json.load(open("./results/levels.json", "r"))
+TIER_1 = set(str(x) for x in pickle.load(open("./network-graph-data/asns_input_clique_asns.pkl", "rb")))
+TRANSIT = set(str(x) for x in pickle.load(open("./network-graph-data/asns_etc_asns.pkl", "rb")))
+EDGE = set(str(x) for x in pickle.load(open("./network-graph-data/asns_stub_or_mh_asns.pkl", "rb")))
 
 
 # Step 1: Read AS relationships data
@@ -22,7 +21,7 @@ def parse_as_relationships(file_path):
             parts = line.strip().split('|')
             if len(parts) < 3:
                 continue
-            as1, as2, rel = int(parts[0]), int(parts[1]), int(parts[2])
+            as1, as2, rel = parts[0], parts[1], int(parts[2])
             edges.append((as1, as2, rel))
             relas[(as1, as2)] = rel
     return edges, relas
@@ -31,7 +30,6 @@ def parse_as_relationships(file_path):
 def compute_graph_metadata(graph):
     for node in graph.nodes:
         graph.nodes[node]["ROV"] = 0
-        graph.nodes[node]["level"] = LEVELS[str(node)]
         if node in TIER_1:
             graph.nodes[node]["type"] = "tier-1"
         elif node in TRANSIT:
@@ -46,7 +44,7 @@ def compute_graph_metadata(graph):
 
 
 def create_graph(
-        edge_file: str = "./data/network-graph-data/cached.txt", 
+        edge_file: str = "./network-graph-data/cached.txt", 
         infos: object = {}, 
         directed: bool = False, 
         special: bool = False,
