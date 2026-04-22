@@ -85,6 +85,8 @@ def compute_impact(
         backend="torch",
         device=device
     )
+    if not os.path.exists("results"):
+        os.makedirs("results")
     base_r_matrix.dump("results/base_r_matrix.lz4")
 
     all_results = []
@@ -112,7 +114,7 @@ def compute_impact(
             backend="torch",    
             device=device
         )
-        deployment_r_matrix.dump("results/{method.__name__}_{adoption_rate}_{dropout}.lz4")
+        deployment_r_matrix.dump(f"results/{method.__name__}_{adoption_rate}_{dropout}.lz4")
 
         num_nodes = len(stripped_graph.nodes)
         
