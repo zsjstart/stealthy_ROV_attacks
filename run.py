@@ -38,12 +38,14 @@ def calculate_impact(
     directly_affected = set()
 
     for node in stripped_graph.nodes():
+        if not deployment_r_matrix.has_asn(node): continue
         if deployment_r_matrix.get_path(attacker, node):
             directly_affected.add(node)
     
     indirectly_affected = set()
 
     for node in stripped_graph.nodes():
+        if not base_r_matrix.has_asn(node): continue
         path = base_r_matrix.get_path(node, victim)
         if not path: continue
 
@@ -74,20 +76,23 @@ def compute_impact(
     
     deployments = get_deployments(methods, stripped_graph, directed_graph)
     attacks = get_attacks()
-        
-    base_r_matrix = RMatrix(
-        input_rels=os.path.join(ROOT_DIR, "network-graph-data", "as-rel.txt"),
-        excluded=set(analysis_graph.nodes()) - set(stripped_graph.nodes())
-    )
-    base_r_matrix.run(
-        max_iter=32,
-        save_next_hop=True,
-        backend="torch",
-        device=device
-    )
-    if not os.path.exists("results"):
-        os.makedirs("results")
-    base_r_matrix.dump("results/base_r_matrix.lz4")
+
+    if not os.path.exists("results/base_r_matrix.lz4"):
+        base_r_matrix = RMatrix(
+            input_rels=rel_file,
+            excluded=set(analysis_graph.nodes()) - set(stripped_graph.nodes())
+        )
+        base_r_matrix.run(
+            max_iter=32,
+            save_next_hop=True,
+            backend="torch",
+            device=device
+        )
+        if not os.path.exists("results"):
+            os.makedirs("results")
+        base_r_matrix.dump("results/base_r_matrix.lz4")
+    else:
+        base_r_matrix = RMatrix.load("results/base_r_matrix.lz4")
 
     all_results = []
     
@@ -103,22 +108,28 @@ def compute_impact(
 
         components = list(nx.connected_components(component_graph))
         component_lengths = list(map(len, components))
-
-        deployment_r_matrix = RMatrix(
-            input_rels=os.path.join(ROOT_DIR, "network-graph-data", "as-rel.txt"), 
-            excluded=set(analysis_graph.nodes()) - set(stripped_graph.nodes()) - set(deployment_nodes)
-        )
-        deployment_r_matrix.run(
-            max_iter=32,        
-            save_next_hop=True, 
-            backend="torch",    
-            device=device
-        )
-        deployment_r_matrix.dump(f"results/{method.__name__}_{adoption_rate}_{dropout}.lz4")
+        matrix_file = f"results/{method.__name__}_{adoption_rate}_{dropout}.lz4"
+        if not os.path.exists(matrix_file):
+            deployment_r_matrix = RMatrix(
+                input_rels=rel_file,
+                excluded=(set(analysis_graph.nodes()) - set(stripped_graph.nodes())).union(set(deployment_nodes))
+            )
+            deployment_r_matrix.run(
+                max_iter=32,        
+                save_next_hop=True, 
+                backend="torch",    
+                device=device
+            )
+            deployment_r_matrix.dump(matrix_file)
+        else:
+            deployment_r_matrix = RMatrix.load(matrix_file)
 
         num_nodes = len(stripped_graph.nodes)
         
         for attacker, victim, _, real in attacks:
+            if not deployment_r_matrix.has_asn(attacker) or not base_r_matrix.has_asn(victim):
+                continue
+
             impact, direct_impact, indirect_impact = calculate_impact(
                 stripped_graph,
                 base_r_matrix,
@@ -147,7 +158,7 @@ def compute_impact(
     return pd.DataFrame(all_results)
 
 
-def get_deployments(methods: list[str], analysis_graph, directed_graph):
+def get_deployments(allowed_methods: list[str], analysis_graph, directed_graph):
     TOP_100 = top_100(directed_graph, None)
 
     possible_methods = [
@@ -160,7 +171,7 @@ def get_deployments(methods: list[str], analysis_graph, directed_graph):
     methods = []
 
     for method in possible_methods:
-        if method.__name__ in methods:
+        if method.__name__ in allowed_methods:
             methods.append(method)
 
     adoption_rates = [
@@ -212,10 +223,10 @@ def get_deployments(methods: list[str], analysis_graph, directed_graph):
                     deployment = method(analysis_graph, adoption_rate)
                     pickle.dump(deployment, open(pkl_path, "wb"))
 
-                deployments.append([
-                    method,
-                    adoption_rate,
-                    0
-                ])
+            deployments.append([
+                method,
+                adoption_rate,
+                0
+            ])
 
     return deployments
