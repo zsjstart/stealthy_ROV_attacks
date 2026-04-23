@@ -1,11 +1,11 @@
+import os
 import json
 import random
 import requests
 import numpy as np
 import pandas as pd
 import networkx as nx
-import os
-from .graph import create_graph
+
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -13,7 +13,6 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def compute_cone(node, cones, graph):
     neighbors = graph.successors(node)
     neighbors = [n for n in neighbors if graph.get_edge_data(node, n).get("relationship") == -1]
-    
 
     if node in cones:
         return cones[node]
@@ -48,8 +47,7 @@ def compute_cone_sizes(graph):
 
 
 def top_100(graph, rate):
-    cone_sizes = compute_cone_sizes(graph)
-    return sorted(graph.nodes, key=lambda x: cone_sizes[x], reverse=True)[:100]
+    return sorted(graph.nodes, key=lambda x: CONE_SIZES[x], reverse=True)[:100]
 
 
 def real_world(graph, rate):
@@ -77,11 +75,7 @@ def real_world(graph, rate):
 
 def cone_size(graph, adoption_rate):
     n = round(adoption_rate * len(graph.nodes))
-    cone_sizes = compute_cone_sizes(graph)
-
-    sorted_nodes = sorted(list(graph.nodes), key=lambda x: cone_sizes[x], reverse=True)
-    
-    return sorted_nodes[0:n]
+    return sorted(list(graph.nodes), key=lambda x: CONE_SIZES[x], reverse=True)[:n]
 
 
 def special_deployment(graph, n):
@@ -90,40 +84,10 @@ def special_deployment(graph, n):
 
 def random_choice(
         graph: nx.Graph, 
-        adoption_rate: float,
-        transit_only: bool = True
+        adoption_rate: float
     ):
-    tier1 = [node for node in graph.nodes if graph.nodes[node]["type"] == "tier-1"]
-    transit = [node for node in graph.nodes if graph.nodes[node]["type"] == "transit"]
-    edge = [node for node in graph.nodes if graph.nodes[node]["type"] == "edge"]
-
-    if transit_only:
-        n = round(adoption_rate * len(transit))
-        return tier1 + random.sample(transit, n)
-    else:
-        n = round(adoption_rate * len(graph.nodes))
-        if len(tier1) >= n:
-            return random.sample(tier1, n)
-        
-        deployment = tier1
-        n -= len(tier1)
-
-        if len(transit) >= n:
-            return deployment + random.sample(transit, n)
-
-        n -= len(transit)
-
-        if len(edge) >= n:
-            return deployment + transit + random.sample(edge, n)
-    
-        return tier1 + transit + edge
-
-
-def level_heuristic(graph, adoption_rate):
     n = round(adoption_rate * len(graph.nodes))
-    nodes = sorted(graph.nodes(data=True), key=lambda x: abs(5 - x[1]["level"]), reverse=True)
-    
-    return set([x[0] for x in nodes[:n]])
+    return random.sample(graph.nodes, n)
 
 
 def degree_centrality(graph, adoption_rate):
@@ -135,13 +99,6 @@ def degree_centrality(graph, adoption_rate):
         deployment.add(max(degrees, key=lambda x: degrees[x]))
     
     return deployment
-
-
-def eigenvector_centrality(graph, adoption_rate):
-    n = round(adoption_rate * len(graph.nodes))
-    nodes = sorted(graph.nodes(data=True), key=lambda x: x[1]["eigenvector"], reverse=True)
-    
-    return set([x[0] for x in nodes[:n]])
 
 
 def kernighan_lin_partition(graph, adoption_rate):

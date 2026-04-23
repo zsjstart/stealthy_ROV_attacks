@@ -15,7 +15,7 @@ import json
 from matrix_bgpsim import RMatrix
 
 from src.methods import *
-from src.graph import create_graph, compute_graph_metadata, calculate_impact
+from src.graph import create_graph, calculate_impact
 
 
 def get_attacks():
@@ -54,7 +54,7 @@ def calculate_impact(
                 indirectly_affected.add(node)
                 break
 
-    return len(directly_affected) + len(indirectly_affected), len(directly_affected), len(indirectly_affected)
+    return len(directly_affected.union(indirectly_affected)), len(directly_affected), len(indirectly_affected)
 
 
 def compute_impact(
@@ -65,22 +65,38 @@ def compute_impact(
     if rel_file is None:
         rel_file = os.path.join(ROOT_DIR, "network-graph-data", "as-rel.txt")
 
-    analysis_graph = create_graph(directed=False, edge_file=rel_file)
-    stripped_graph = analysis_graph.copy()
-    stripped_graph.remove_nodes_from([node for node in stripped_graph.nodes if stripped_graph.nodes[node]["type"] == "edge"])
+    full_undirected_graph = create_graph(directed=False, edge_file=rel_file)
+    full_directed_graph = create_graph(directed=True, edge_file=rel_file)
+
+    TRANSIT_NODES = [
+        node 
+        for node in full_directed_graph.nodes 
+        if full_directed_graph.nodes[node]["type"] == "transit"
+    ]
+
+    EDGE_NODES = [
+        node 
+        for node in full_directed_graph.nodes 
+        if full_directed_graph.nodes[node]["type"] == "edge"
+    ]
+
+    stripped_undirected_graph = full_undirected_graph.copy()
+    stripped_undirected_graph.remove_nodes_from(EDGE_NODES)
+
+    stripped_directed_graph = full_directed_graph.copy()
+    stripped_directed_graph.remove_nodes_from(EDGE_NODES)
     
-    directed_graph = create_graph(directed=True, edge_file=rel_file)
-    directed_graph.remove_nodes_from([node for node in directed_graph.nodes if directed_graph.nodes[node]["type"] == "edge"])
-    
-    compute_graph_metadata(stripped_graph)
-    
-    deployments = get_deployments(methods, stripped_graph, directed_graph)
+    deployments = get_deployments(
+        methods, 
+        stripped_undirected_graph, 
+        stripped_directed_graph
+    )
     attacks = get_attacks()
 
     if not os.path.exists("results/base_r_matrix.lz4"):
         base_r_matrix = RMatrix(
             input_rels=rel_file,
-            excluded=set(analysis_graph.nodes()) - set(stripped_graph.nodes())
+            excluded=set(EDGE_NODES)
         )
         base_r_matrix.run(
             max_iter=32,
@@ -103,16 +119,16 @@ def compute_impact(
         with open(pkl_path, "rb") as f:
             deployment_nodes = pickle.load(f)
 
-        component_graph = analysis_graph.copy()
+        component_graph = full_undirected_graph.copy()
         component_graph.remove_nodes_from(deployment_nodes)
-
         components = list(nx.connected_components(component_graph))
         component_lengths = list(map(len, components))
+        
         matrix_file = f"results/{method.__name__}_{adoption_rate}_{dropout}.lz4"
         if not os.path.exists(matrix_file):
             deployment_r_matrix = RMatrix(
                 input_rels=rel_file,
-                excluded=(set(analysis_graph.nodes()) - set(stripped_graph.nodes())).union(set(deployment_nodes))
+                excluded=set(EDGE_NODES).union(set(deployment_nodes))
             )
             deployment_r_matrix.run(
                 max_iter=32,        
@@ -124,14 +140,14 @@ def compute_impact(
         else:
             deployment_r_matrix = RMatrix.load(matrix_file)
 
-        num_nodes = len(stripped_graph.nodes)
+        num_nodes = len(stripped_undirected_graph.nodes)
         
         for attacker, victim, _, real in attacks:
             if not deployment_r_matrix.has_asn(attacker) or not base_r_matrix.has_asn(victim):
                 continue
 
             impact, direct_impact, indirect_impact = calculate_impact(
-                stripped_graph,
+                stripped_undirected_graph,
                 base_r_matrix,
                 deployment_r_matrix,
                 attacker,
