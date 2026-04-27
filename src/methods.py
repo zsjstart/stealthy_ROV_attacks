@@ -62,7 +62,7 @@ def real_world(graph, rate):
         try:
             response = requests.get(link_template.format(offset=offset, count=count))
             data += response.json()["data"]
-
+            print(len(data))
             if len(response.json()["data"]) < count:
                 break
         except requests.exceptions.RequestException as e:
@@ -70,7 +70,7 @@ def real_world(graph, rate):
             break
         offset += count
 
-    return list(map(lambda x: x["asn"], filter(lambda x: x["ratio"] > 0.1 and x["asn"] in graph.nodes, data)))
+    return list(map(lambda x: x["asn"], filter(lambda x: x["ratio"] > 0, data)))
 
 
 def cone_size(graph, adoption_rate):

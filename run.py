@@ -5,26 +5,109 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.append(ROOT_DIR)
 
+import csv
 import pickle
 import networkx as nx
 import pandas as pd 
 import numpy as np
-import torch
 import json
 
+from tqdm import tqdm
+from itertools import product
 from matrix_bgpsim import RMatrix
 
 from src.methods import *
 from src.graph import create_graph, calculate_impact
 
 
-def get_attacks():
-    attack_df = pd.read_csv(os.path.join(ROOT_DIR, "network-graph-data", "LLM_real_hijacks_new.csv"))
+
+def get_all_roas(csv_file_path: str) -> list[dict[str, str]]:
+    """
+    Reads a VRP/ROA CSV file and returns all ASN-prefix pairs.
+
+    Example return:
+    [
+        {"asn": "AS64496", "prefix": "203.0.113.0/24"},
+        {"asn": "AS64497", "prefix": "198.51.100.0/24"}
+    ]
+    """
+
+    results = []
+
+    with open(csv_file_path, newline="", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+
+        for row in reader:
+            row_asn = (
+                row.get("asn")
+                or row.get("ASN")
+                or row.get("asID")
+                or row.get("origin")
+            )
+
+            prefix = (
+                row.get("prefix")
+                or row.get("Prefix")
+            )
+
+            if not row_asn or not prefix:
+                continue
+
+            row_asn = str(row_asn).upper().strip()
+
+            if not row_asn.startswith("AS"):
+                row_asn = f"AS{row_asn}"
+
+            results.append({
+                "asn": row_asn,
+                "prefix": prefix.strip()
+            })
+
+    return results
+
+
+def get_attacks(graph: nx.Graph):
+    attack_df = pd.read_csv(
+        os.path.join(ROOT_DIR, "network-graph-data", "LLM_real_hijacks_new.csv")
+    )
     attacks = []
 
     for idx, row in attack_df.iterrows():
-        attacks.append((row["unexpected_origin"].replace("AS", ""), row["expected_origin"].replace("AS", ""), row["prefix"], True))
+        attacks.append((
+            row["unexpected_origin"].replace("AS", ""), 
+            row["expected_origin"].replace("AS", ""), 
+            row["prefix"], 
+            True
+        ))
     
+    # Create synthetic attacks
+    edge_nodes = [node for node in graph.nodes if graph.nodes[node]["type"] == "edge"]
+    attackers = random.sample(edge_nodes, 1000)
+
+    nodes_with_roas = get_all_roas("data/vrp.csv")
+    victim_objects = random.sample(nodes_with_roas, 1000)
+
+    for attacker, victim in zip(attackers, victim_objects):
+        ip, max_length = victim["prefix"].split("/")
+
+        attacks.append((
+            attacker, 
+            victim["asn"], 
+            ip + "/" + max_length if max_length >= 24 else ip + "/" + str(int(max_length) + 1), 
+            True
+        ))
+
+    # create all
+    for attacker, victim in product(attackers, graph.nodes):
+        if attacker == victim: continue
+
+        attacks.append((
+            attacker, 
+            victim, 
+            "", 
+            False
+        ))
+
     return attacks
 
 
@@ -91,7 +174,9 @@ def compute_impact(
         stripped_undirected_graph, 
         stripped_directed_graph
     )
-    attacks = get_attacks()
+
+    attacks = get_attacks(full_directed_graph)
+
 
     if not os.path.exists("results/base_r_matrix.lz4"):
         base_r_matrix = RMatrix(
@@ -142,7 +227,7 @@ def compute_impact(
 
         num_nodes = len(stripped_undirected_graph.nodes)
         
-        for attacker, victim, _, real in attacks:
+        for attacker, victim, _, real in tqdm(attacks):
             if not deployment_r_matrix.has_asn(attacker) or not base_r_matrix.has_asn(victim):
                 continue
 
