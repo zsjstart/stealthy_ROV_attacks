@@ -93,10 +93,9 @@ def compute_impact(
     )
     attacks = get_attacks()
 
-    if not os.path.exists("results/base_r_matrix.lz4"):
+    if not os.path.exists("results/full_base_r_matrix.lz4"):
         base_r_matrix = RMatrix(
             input_rels=rel_file,
-            excluded=set(EDGE_NODES)
         )
         base_r_matrix.run(
             max_iter=32,
@@ -106,9 +105,9 @@ def compute_impact(
         )
         if not os.path.exists("results"):
             os.makedirs("results")
-        base_r_matrix.dump("results/base_r_matrix.lz4")
+        base_r_matrix.dump("results/full_base_r_matrix.lz4")
     else:
-        base_r_matrix = RMatrix.load("results/base_r_matrix.lz4")
+        base_r_matrix = RMatrix.load("results/full_base_r_matrix.lz4")
 
     all_results = []
     
@@ -128,7 +127,7 @@ def compute_impact(
         if not os.path.exists(matrix_file):
             deployment_r_matrix = RMatrix(
                 input_rels=rel_file,
-                excluded=set(EDGE_NODES).union(set(deployment_nodes))
+                excluded=set(deployment_nodes)
             )
             deployment_r_matrix.run(
                 max_iter=32,        
@@ -140,14 +139,14 @@ def compute_impact(
         else:
             deployment_r_matrix = RMatrix.load(matrix_file)
 
-        num_nodes = len(stripped_undirected_graph.nodes)
+        num_nodes = len(full_undirected_graph.nodes)
         
         for attacker, victim, _, real in attacks:
             if not deployment_r_matrix.has_asn(attacker) or not base_r_matrix.has_asn(victim):
                 continue
 
             impact, direct_impact, indirect_impact = calculate_impact(
-                stripped_undirected_graph,
+                full_undirected_graph,
                 base_r_matrix,
                 deployment_r_matrix,
                 attacker,
@@ -174,10 +173,11 @@ def compute_impact(
     return pd.DataFrame(all_results)
 
 
-def get_deployments(allowed_methods: list[str], analysis_graph, directed_graph):
+def get_deployments(allowed_methods: list[str], analysis_graph, directed_graph, dropouts: list | None = None):
     TOP_100 = top_100(directed_graph, None)
 
     possible_methods = [
+        real_world,
         random_choice, 
         cone_size,
         degree_centrality, 
@@ -203,24 +203,11 @@ def get_deployments(allowed_methods: list[str], analysis_graph, directed_graph):
         0.9
     ]
 
-    dropouts = [
-        0,
-        10,
-        20,
-        30,
-        40,
-        50,
-        60,
-        70,
-        80,
-        90
-    ]
-
     deployments = []
 
     for method in methods:
         for adoption_rate in adoption_rates:
-            if method.__name__ == "cone_size":
+            if dropouts:
                 for dropout in dropouts:
                     pkl_path = os.path.join(ROOT_DIR, "deployments", f"{method.__name__}_{adoption_rate}_{dropout}.pkl")
                     if not os.path.exists(pkl_path):
