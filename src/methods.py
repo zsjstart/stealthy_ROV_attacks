@@ -6,13 +6,13 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 
-
+from .graph import create_graph
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def compute_cone(node, cones, graph):
     neighbors = graph.successors(node)
-    neighbors = [n for n in neighbors if graph.get_edge_data(node, n).get("relationship") == -1]
+    neighbors = [n for n in neighbors if graph.get_edge_data(node, n).get("relationship") == 1]
 
     if node in cones:
         return cones[node]
@@ -28,22 +28,21 @@ def compute_cone(node, cones, graph):
     cones[node] = cone
     return cone
 
-CONE_SIZES = {}
 
-def compute_cone_sizes(graph):
-    global CONE_SIZES
-    if CONE_SIZES:
-        return CONE_SIZES
-
+def compute_cone_sizes():
     cones = {}
+    cone_sizes = {}
+    graph = create_graph(directed=True, special=True, edge_file="caida.txt")
 
     for node in graph.nodes:
         compute_cone(node, cones, graph)
 
     for key in cones:
-        CONE_SIZES[key] = len(cones[key])
+        cone_sizes[key] = len(cones[key])
 
-    return CONE_SIZES
+    return cone_sizes
+
+CONE_SIZES = compute_cone_sizes()
 
 
 def top_100(graph, rate):
@@ -87,7 +86,7 @@ def random_choice(
         adoption_rate: float
     ):
     n = round(adoption_rate * len(graph.nodes))
-    return random.sample(graph.nodes, n)
+    return random.sample(list(graph.nodes), n)
 
 
 def degree_centrality(graph, adoption_rate):
