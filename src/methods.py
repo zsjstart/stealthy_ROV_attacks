@@ -61,7 +61,6 @@ def real_world(graph, rate):
         try:
             response = requests.get(link_template.format(offset=offset, count=count))
             data += response.json()["data"]
-            print(len(data))
             if len(response.json()["data"]) < count:
                 break
         except requests.exceptions.RequestException as e:

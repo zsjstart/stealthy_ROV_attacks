@@ -71,33 +71,49 @@ def get_attacks(graph: nx.Graph):
         ))
     
     # Create synthetic attacks
-    edge_nodes = [node for node in graph.nodes if graph.nodes[node]["type"] == "edge"]
-    attackers = random.sample(edge_nodes, 1000)
+    if os.path.exists("results/synthetic_attacks.pkl"):
+        with open("results/synthetic_attacks.pkl", "rb") as f:
+            synthetic_attacks = pickle.load(f)
+    else:
+        edge_nodes = [node for node in graph.nodes if graph.nodes[node]["type"] == "edge"]
+        attackers = random.sample(edge_nodes, 1000)
 
-    nodes_with_roas = get_all_roas("vrps.csv")
-    victim_objects = random.sample(nodes_with_roas, 1000)
+        nodes_with_roas = get_all_roas("vrps.csv")
+        victim_objects = random.sample(nodes_with_roas, 1000)
+        synthetic_attacks = []
 
-    for attacker, victim in zip(attackers, victim_objects):
-        ip, max_length = victim["prefix"].split("/")
+        for attacker, victim in zip(attackers, victim_objects):
+            ip, max_length = victim["prefix"].split("/")
 
-        attacks.append((
-            attacker, 
-            victim["asn"], 
-            ip + "/" + max_length if int(max_length) >= 24 else ip + "/" + str(int(max_length) + 1), 
-            True
-        ))
-
+            synthetic_attacks.append((
+                attacker, 
+                victim["asn"], 
+                ip + "/" + max_length if int(max_length) >= 24 else ip + "/" + str(int(max_length) + 1), 
+                "synthetic_hijack"
+            ))
+        with open("results/synthetic_attacks.pkl", "wb") as f:
+            pickle.dump(synthetic_attacks, f)
+    attacks += synthetic_attacks
     # create all
-    for attacker, victim in list(product(attackers, graph.nodes))[:20000]:
-        if attacker == victim: continue
+    """     
+    if os.path.exists("results/all_attacks.pkl"):
+        with open("results/all_attacks.pkl", "rb") as f:
+            attacks += pickle.load(f)
+        return attacks
+    else:
+        for attacker, victim in list(product(attackers, graph.nodes))[:20000]:
+            if attacker == victim: continue
 
-        attacks.append((
-            attacker, 
-            victim, 
-            "", 
-            "misconfiguration"
-        ))
-
+            attacks.append((
+                attacker, 
+                victim, 
+                "", 
+                "misconfiguration"
+            ))
+        with open("results/all_attacks.pkl", "wb") as f:
+            pickle.dump(attacks, f)
+    """
+    
     return attacks
 
 
@@ -140,7 +156,7 @@ def compute_impact(
 ):
     if rel_file is None:
         rel_file = os.path.join(ROOT_DIR, "network-graph-data", "as-rel.txt")
-    
+
     full_undirected_graph = create_graph(directed=False, edge_file=rel_file)
     full_directed_graph = create_graph(directed=True, edge_file=rel_file)
 
@@ -174,6 +190,7 @@ def compute_impact(
 
 
     if not os.path.exists(f"results/full_base_r_matrix{'full' if full_graph else ''}.lz4"):
+        print(f"results/full_base_r_matrix{'full' if full_graph else ''}.lz4")
         base_r_matrix = RMatrix(
             input_rels=rel_file,
         )
