@@ -83,13 +83,8 @@ def get_attacks(graph: nx.Graph):
         attacks.append((
             attacker, 
             victim["asn"], 
-<<<<<<< HEAD
-            ip + "/" + max_length if max_length >= 24 else ip + "/" + str(int(max_length) + 1), 
-            "synthetic_hijack"
-=======
             ip + "/" + max_length if int(max_length) >= 24 else ip + "/" + str(int(max_length) + 1), 
             True
->>>>>>> 1424207e557427c1b066d48dfeb87a16dd89e368
         ))
 
     # create all
