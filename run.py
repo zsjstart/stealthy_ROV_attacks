@@ -67,7 +67,7 @@ def get_attacks(graph: nx.Graph):
             row["unexpected_origin"].replace("AS", ""), 
             row["expected_origin"].replace("AS", ""), 
             row["prefix"], 
-            True
+            "real_hijack"
         ))
     
     # Create synthetic attacks
@@ -95,7 +95,7 @@ def get_attacks(graph: nx.Graph):
             attacker, 
             victim, 
             "", 
-            False
+            "misconfiguration"
         ))
 
     return attacks
@@ -119,6 +119,8 @@ def calculate_impact(
 
     for node in stripped_graph.nodes():
         if not base_r_matrix.has_asn(node): continue
+        if node in directly_affected: continue
+
         path = base_r_matrix.get_path(node, victim)
         if not path: continue
 
@@ -134,6 +136,7 @@ def compute_impact(
     methods: list[str],
     rel_file: str = None,
     device: str = "cuda:0",
+    full_graph: bool = False
 ):
     if rel_file is None:
         rel_file = os.path.join(ROOT_DIR, "network-graph-data", "as-rel.txt")
@@ -154,10 +157,12 @@ def compute_impact(
     ]
 
     stripped_undirected_graph = full_undirected_graph.copy()
-    stripped_undirected_graph.remove_nodes_from(EDGE_NODES)
+    if not full_graph:
+        stripped_undirected_graph.remove_nodes_from(EDGE_NODES)
 
     stripped_directed_graph = full_directed_graph.copy()
-    stripped_directed_graph.remove_nodes_from(EDGE_NODES)
+    if not full_graph:
+        stripped_directed_graph.remove_nodes_from(EDGE_NODES)
     
     deployments = get_deployments(
         methods, 
@@ -168,7 +173,7 @@ def compute_impact(
     attacks = get_attacks(full_directed_graph)
 
 
-    if not os.path.exists("results/full_base_r_matrix.lz4"):
+    if not os.path.exists(f"results/full_base_r_matrix{'full' if full_graph else ''}.lz4"):
         base_r_matrix = RMatrix(
             input_rels=rel_file,
         )
@@ -180,9 +185,9 @@ def compute_impact(
         )
         if not os.path.exists("results"):
             os.makedirs("results")
-        base_r_matrix.dump("results/full_base_r_matrix.lz4")
+        base_r_matrix.dump(f"results/full_base_r_matrix{'full' if full_graph else ''}.lz4")
     else:
-        base_r_matrix = RMatrix.load("results/full_base_r_matrix.lz4")
+        base_r_matrix = RMatrix.load(f"results/full_base_r_matrix{'full' if full_graph else ''}.lz4")
 
     all_results = []
     
@@ -198,7 +203,11 @@ def compute_impact(
         components = list(nx.connected_components(component_graph))
         component_lengths = list(map(len, components))
         
-        matrix_file = f"results/{method.__name__}_{adoption_rate}_{dropout}.lz4"
+        if full_graph:
+            matrix_file = f"results/{method.__name__}_{adoption_rate}_{dropout}_full.lz4"
+        else:
+            matrix_file = f"results/{method.__name__}_{adoption_rate}_{dropout}.lz4"
+
         if not os.path.exists(matrix_file):
             deployment_r_matrix = RMatrix(
                 input_rels=rel_file,
@@ -240,9 +249,9 @@ def compute_impact(
                 "number_of_components": len(components),
                 "max_component": max(component_lengths),
                 "average_component": np.mean(component_lengths),
-                "mode": "real_hijack" if real else "fake_hijack"
+                "mode": real
             }
-            json.dump(res, open(os.path.join(ROOT_DIR, "results", f"{method.__name__}_{adoption_rate}_{dropout}_{attacker}_{victim}.json"), "w"))
+            json.dump(res, open(os.path.join(ROOT_DIR, "results", f"{method.__name__}_{adoption_rate}_{dropout}_{attacker}_{victim}{'_full' if full_graph else ''}.json"), "w"))
             all_results.append(res)
             
     return pd.DataFrame(all_results)
@@ -276,12 +285,15 @@ def get_deployments(allowed_methods: list[str], analysis_graph, directed_graph, 
         0.7,
         0.8,
         0.9
-    ]
+    ] 
 
     deployments = []
 
     for method in methods:
         for adoption_rate in adoption_rates:
+            if method.__name__ == "real_world" and adoption_rate > 0.05:
+                continue
+            
             if dropouts:
                 for dropout in dropouts:
                     pkl_path = os.path.join(ROOT_DIR, "deployments", f"{method.__name__}_{adoption_rate}_{dropout}.pkl")
