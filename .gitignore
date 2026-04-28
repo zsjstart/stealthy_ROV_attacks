@@ -1,2 +1,4 @@
 deployments/
+results/
 __pycache__/
+.venv*
