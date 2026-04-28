@@ -38,25 +38,15 @@ def get_all_roas(csv_file_path: str) -> list[dict[str, str]]:
         reader = csv.DictReader(file)
 
         for row in reader:
-            row_asn = (
-                row.get("asn")
-                or row.get("ASN")
-                or row.get("asID")
-                or row.get("origin")
-            )
+            row_asn = row.get("ASN")
 
-            prefix = (
-                row.get("prefix")
-                or row.get("Prefix")
-            )
+            prefix = row.get("IP Prefix")
 
             if not row_asn or not prefix:
                 continue
 
             row_asn = str(row_asn).upper().strip()
-
-            if not row_asn.startswith("AS"):
-                row_asn = f"AS{row_asn}"
+            row_asn = row_asn.replace("AS", "")
 
             results.append({
                 "asn": row_asn,
@@ -84,7 +74,7 @@ def get_attacks(graph: nx.Graph):
     edge_nodes = [node for node in graph.nodes if graph.nodes[node]["type"] == "edge"]
     attackers = random.sample(edge_nodes, 1000)
 
-    nodes_with_roas = get_all_roas("data/vrp.csv")
+    nodes_with_roas = get_all_roas("vrps.csv")
     victim_objects = random.sample(nodes_with_roas, 1000)
 
     for attacker, victim in zip(attackers, victim_objects):
@@ -93,12 +83,17 @@ def get_attacks(graph: nx.Graph):
         attacks.append((
             attacker, 
             victim["asn"], 
+<<<<<<< HEAD
             ip + "/" + max_length if max_length >= 24 else ip + "/" + str(int(max_length) + 1), 
             "synthetic_hijack"
+=======
+            ip + "/" + max_length if int(max_length) >= 24 else ip + "/" + str(int(max_length) + 1), 
+            True
+>>>>>>> 1424207e557427c1b066d48dfeb87a16dd89e368
         ))
 
     # create all
-    for attacker, victim in product(attackers, graph.nodes):
+    for attacker, victim in list(product(attackers, graph.nodes))[:20000]:
         if attacker == victim: continue
 
         attacks.append((
@@ -150,7 +145,7 @@ def compute_impact(
 ):
     if rel_file is None:
         rel_file = os.path.join(ROOT_DIR, "network-graph-data", "as-rel.txt")
-
+    
     full_undirected_graph = create_graph(directed=False, edge_file=rel_file)
     full_directed_graph = create_graph(directed=True, edge_file=rel_file)
 
