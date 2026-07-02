@@ -1,339 +1,185 @@
+"""
+run.py — sweep ROV deployments x hijacks and record direct/indirect impact,
+using the fast C engine (src.engine) with an optional route-leak probability.
+
+Expected data layout (paths relative to project root):
+  network-graph-data/as-rel.txt              AS relationships (P|C|-1, X|Y|0)
+  network-graph-data/LLM_real_hijacks_new.csv  real hijacks (optional)
+  deployments/<method>_<rate>.pkl            precomputed ROV adopter sets
+  results/                                    per-scenario JSON is written here
+
+If you just want to see it work, run examples/demo.py instead — it needs no data.
+"""
 import os
 import sys
+import csv
+import json
+import pickle
+import random
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.append(ROOT_DIR)
 
-import csv
-import pickle
-import networkx as nx
-import pandas as pd 
 import numpy as np
-import json
-
+import pandas as pd
+import networkx as nx
 from tqdm import tqdm
-from itertools import product
-from matrix_bgpsim import RMatrix
 
-from src.methods import *
-from src.graph import create_graph, calculate_impact
-
+from src.graph import create_graph
+from src.engine import BGPEngine, csr_from_nx
+from src import methods as M
 
 
-def get_all_roas(csv_file_path: str) -> list[dict[str, str]]:
-    """
-    Reads a VRP/ROA CSV file and returns all ASN-prefix pairs.
-
-    Example return:
-    [
-        {"asn": "AS64496", "prefix": "203.0.113.0/24"},
-        {"asn": "AS64497", "prefix": "198.51.100.0/24"}
-    ]
-    """
-
+# --------------------------------------------------------------------------
+# data loading
+# --------------------------------------------------------------------------
+def get_all_roas(csv_file_path):
     results = []
-
     with open(csv_file_path, newline="", encoding="utf-8") as file:
-        reader = csv.DictReader(file)
-
-        for row in reader:
-            row_asn = row.get("ASN")
-
-            prefix = row.get("IP Prefix")
-
-            if not row_asn or not prefix:
+        for row in csv.DictReader(file):
+            asn, prefix = row.get("ASN"), row.get("IP Prefix")
+            if not asn or not prefix:
                 continue
-
-            row_asn = str(row_asn).upper().strip()
-            row_asn = row_asn.replace("AS", "")
-
-            results.append({
-                "asn": row_asn,
-                "prefix": prefix.strip()
-            })
-
+            results.append({"asn": str(asn).upper().strip().replace("AS", ""),
+                            "prefix": prefix.strip()})
     return results
 
 
-def get_attacks(graph: nx.Graph):
-    attack_df = pd.read_csv(
-        os.path.join(ROOT_DIR, "network-graph-data", "LLM_real_hijacks_new.csv")
-    )
+def get_attacks(graph):
     attacks = []
+    real_csv = os.path.join(ROOT_DIR, "network-graph-data", "LLM_real_hijacks_new.csv")
+    if os.path.exists(real_csv):
+        for _, row in pd.read_csv(real_csv).iterrows():
+            attacks.append((str(row["unexpected_origin"]).replace("AS", ""),
+                            str(row["expected_origin"]).replace("AS", ""),
+                            row["prefix"], "real_hijack"))
 
-    for idx, row in attack_df.iterrows():
-        attacks.append((
-            row["unexpected_origin"].replace("AS", ""), 
-            row["expected_origin"].replace("AS", ""), 
-            row["prefix"], 
-            "real_hijack"
-        ))
-    
-    # Create synthetic attacks
-    if os.path.exists("results/synthetic_attacks.pkl"):
-        with open("results/synthetic_attacks.pkl", "rb") as f:
-            synthetic_attacks = pickle.load(f)
-    else:
-        edge_nodes = [node for node in graph.nodes if graph.nodes[node]["type"] == "edge"]
-        attackers = random.sample(edge_nodes, 1000)
-
-        nodes_with_roas = get_all_roas("vrps.csv")
-        victim_objects = random.sample(nodes_with_roas, 1000)
-        synthetic_attacks = []
-
-        for attacker, victim in zip(attackers, victim_objects):
-            ip, max_length = victim["prefix"].split("/")
-
-            synthetic_attacks.append((
-                attacker, 
-                victim["asn"], 
-                ip + "/" + max_length if int(max_length) >= 24 else ip + "/" + str(int(max_length) + 1), 
-                "synthetic_hijack"
-            ))
-        with open("results/synthetic_attacks.pkl", "wb") as f:
-            pickle.dump(synthetic_attacks, f)
-    attacks += synthetic_attacks
-    # create all
-    """     
-    if os.path.exists("results/all_attacks.pkl"):
-        with open("results/all_attacks.pkl", "rb") as f:
+    syn_path = os.path.join(ROOT_DIR, "results", "synthetic_attacks.pkl")
+    if os.path.exists(syn_path):
+        with open(syn_path, "rb") as f:
             attacks += pickle.load(f)
-        return attacks
-    else:
-        for attacker, victim in list(product(attackers, graph.nodes))[:20000]:
-            if attacker == victim: continue
-
-            attacks.append((
-                attacker, 
-                victim, 
-                "", 
-                "misconfiguration"
-            ))
-        with open("results/all_attacks.pkl", "wb") as f:
-            pickle.dump(attacks, f)
-    """
+    elif os.path.exists(os.path.join(ROOT_DIR, "vrps.csv")):
+        edge_nodes = [n for n in graph.nodes if graph.nodes[n]["type"] == "edge"]
+        attackers = random.sample(edge_nodes, min(1000, len(edge_nodes)))
+        roas = get_all_roas(os.path.join(ROOT_DIR, "vrps.csv"))
+        victims = random.sample(roas, min(1000, len(roas)))
+    
+        synthetic = []
+        for attacker, v in zip(attackers, victims):
+            ip, ml = v["prefix"].split("/")
+            sub = ip + "/" + (ml if int(ml) >= 24 else str(int(ml) + 1))
+            synthetic.append((attacker, v["asn"], sub, "synthetic_hijack"))
+    
+        with open(syn_path, "wb") as f:
+            pickle.dump(synthetic, f)
+        attacks += synthetic
     
     return attacks
 
 
-def calculate_impact(
-    stripped_graph: nx.Graph,
-    base_r_matrix: RMatrix, 
-    deployment_r_matrix: RMatrix, 
-    attacker: int, 
-    victim: int 
-):
-    directly_affected = set()
-
-    for node in stripped_graph.nodes():
-        if not deployment_r_matrix.has_asn(node): continue
-        if deployment_r_matrix.get_path(attacker, node):
-            directly_affected.add(node)
-    
-    indirectly_affected = set()
-
-    for node in stripped_graph.nodes():
-        if not base_r_matrix.has_asn(node): continue
-        if node in directly_affected: continue
-
-        path = base_r_matrix.get_path(node, victim)
-        if not path: continue
-
-        for path_node in path:
-            if path_node in directly_affected:
-                indirectly_affected.add(node)
-                break
-
-    return len(directly_affected.union(indirectly_affected)), len(directly_affected), len(indirectly_affected)
+def get_deployments(allowed_methods, analysis_graph, directed_graph):
+    possible = [M.real_world, M.random_choice, M.cone_size, M.degree_centrality,
+                M.louvain_communities, M.kernighan_lin_partition]
+    chosen = [m for m in possible if m.__name__ in allowed_methods]
+    rates = [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    deployments = []
+    for method in chosen:
+        for rate in rates:
+            if method.__name__ == "real_world" and rate > 0.05:
+                continue
+            pkl = os.path.join(ROOT_DIR, "deployments", f"{method.__name__}_{rate}.pkl")
+            if not os.path.exists(pkl):
+                os.makedirs(os.path.dirname(pkl), exist_ok=True)
+                pickle.dump(method(analysis_graph, rate), open(pkl, "wb"))
+            deployments.append([method, rate, 0])
+    return deployments
 
 
-def compute_impact(
-    methods: list[str],
-    rel_file: str = None,
-    device: str = "cuda:0",
-    full_graph: bool = False
-):
+# --------------------------------------------------------------------------
+# main sweep
+# --------------------------------------------------------------------------
+def compute_impact(methods_list, rel_file=None, full_graph=False,
+                   leak_prob=0.0, leak_seed=0, mode="subprefix"):
     if rel_file is None:
-        rel_file = os.path.join(ROOT_DIR, "network-graph-data", "as-rel.txt")
+        rel_file = os.path.join(ROOT_DIR, "network-graph-data", "caida.txt")
 
-    full_undirected_graph = create_graph(directed=False, edge_file=rel_file)
-    full_directed_graph = create_graph(directed=True, edge_file=rel_file)
+    full_undirected = create_graph(directed=False, edge_file=rel_file)
+    full_directed = create_graph(directed=True, edge_file=rel_file)
 
-    TRANSIT_NODES = [
-        node 
-        for node in full_directed_graph.nodes 
-        if full_directed_graph.nodes[node]["type"] == "transit"
-    ]
+    EDGE_NODES = [n for n in full_directed.nodes if full_directed.nodes[n]["type"] == "edge"]
 
-    EDGE_NODES = [
-        node 
-        for node in full_directed_graph.nodes 
-        if full_directed_graph.nodes[node]["type"] == "edge"
-    ]
-
-    stripped_undirected_graph = full_undirected_graph.copy()
+    stripped_undirected = full_undirected.copy()
+    stripped_directed = full_directed.copy()
     if not full_graph:
-        stripped_undirected_graph.remove_nodes_from(EDGE_NODES)
+        stripped_undirected.remove_nodes_from(EDGE_NODES)
+        stripped_directed.remove_nodes_from(EDGE_NODES)
 
-    stripped_directed_graph = full_directed_graph.copy()
-    if not full_graph:
-        stripped_directed_graph.remove_nodes_from(EDGE_NODES)
-    
-    deployments = get_deployments(
-        methods, 
-        stripped_undirected_graph, 
-        stripped_directed_graph
-    )
+    # ONE engine over the full directed graph; ROV set varies per deployment.
+    engine = BGPEngine(csr_from_nx(full_directed))
+    engine.set_leak(prob=leak_prob, seed=leak_seed)
+    asn2id = engine.csr.asn2id
+    num_nodes = full_directed.number_of_nodes()
 
-    attacks = get_attacks(full_directed_graph)
-
-
-    if not os.path.exists(f"results/full_base_r_matrix{'full' if full_graph else ''}.lz4"):
-        print(f"results/full_base_r_matrix{'full' if full_graph else ''}.lz4")
-        base_r_matrix = RMatrix(
-            input_rels=rel_file,
-        )
-        base_r_matrix.run(
-            max_iter=32,
-            save_next_hop=True,
-            backend="torch",
-            device=device
-        )
-        if not os.path.exists("results"):
-            os.makedirs("results")
-        base_r_matrix.dump(f"results/full_base_r_matrix{'full' if full_graph else ''}.lz4")
-    else:
-        base_r_matrix = RMatrix.load(f"results/full_base_r_matrix{'full' if full_graph else ''}.lz4")
-
+    deployments = get_deployments(methods_list, stripped_undirected, stripped_directed)
+    attacks = get_attacks(full_directed)
     all_results = []
-    
-    for deployment in deployments:
-        method, adoption_rate, dropout = deployment
-        
-        pkl_path = os.path.join(ROOT_DIR, "deployments", f"{method.__name__}_{adoption_rate}_{dropout}.pkl")
-        with open(pkl_path, "rb") as f:
+
+    for method, adoption_rate, dropout in deployments:
+        pkl = os.path.join(ROOT_DIR, "deployments", f"{method.__name__}_{adoption_rate}.pkl")
+        with open(pkl, "rb") as f:
             deployment_nodes = pickle.load(f)
 
-        component_graph = full_undirected_graph.copy()
-        component_graph.remove_nodes_from(deployment_nodes)
-        components = list(nx.connected_components(component_graph))
-        component_lengths = list(map(len, components))
-        
-        if full_graph:
-            matrix_file = f"results/{method.__name__}_{adoption_rate}_{dropout}_full.lz4"
-        else:
-            matrix_file = f"results/{method.__name__}_{adoption_rate}_{dropout}.lz4"
+        # ROV mask for this deployment
+        rov = engine.zeros_rov()
+        for node in deployment_nodes:
+            if node in asn2id:
+                rov[asn2id[node]] = 1
 
-        if not os.path.exists(matrix_file):
-            deployment_r_matrix = RMatrix(
-                input_rels=rel_file,
-                excluded=set(deployment_nodes)
-            )
-            deployment_r_matrix.run(
-                max_iter=32,        
-                save_next_hop=True, 
-                backend="torch",    
-                device=device
-            )
-            deployment_r_matrix.dump(matrix_file)
-        else:
-            deployment_r_matrix = RMatrix.load(matrix_file)
+        # connectivity stats of the graph once adopters are removed
+        comp_graph = full_undirected.copy()
+        comp_graph.remove_nodes_from(deployment_nodes)
+        components = list(nx.connected_components(comp_graph))
+        comp_len = list(map(len, components)) or [0]
 
-        num_nodes = len(full_undirected_graph.nodes)
-        
-        for attacker, victim, _, real in tqdm(attacks):
-            if not deployment_r_matrix.has_asn(attacker) or not base_r_matrix.has_asn(victim):
+        for attacker, victim, _prefix, real in tqdm(attacks, desc=f"{method.__name__}@{adoption_rate}"):
+            if attacker not in asn2id or victim not in asn2id or attacker == victim:
                 continue
 
-            impact, direct_impact, indirect_impact = calculate_impact(
-                full_undirected_graph,
-                base_r_matrix,
-                deployment_r_matrix,
-                attacker,
-                victim
-            )
-
+            r = engine.scenario(asn2id[attacker], asn2id[victim], rov_mask=rov, mode=mode)
+            direct, indirect = r["direct"], r["indirect"]
             res = {
-                "adoption_rate": adoption_rate,
-                "dropout": dropout,
-                "impact": impact / num_nodes,
-                "direct_impact": direct_impact / num_nodes,
-                "indirect_impact": indirect_impact / num_nodes,
-                "method": method.__name__,
-                "attacker": attacker,
-                "victim": victim,
+                "adoption_rate": adoption_rate, "dropout": dropout,
+                "impact": (direct + indirect) / num_nodes,
+                "direct_impact": direct / num_nodes,
+                "indirect_impact": indirect / num_nodes,
+                "method": method.__name__, "attacker": attacker, "victim": victim,
+                "leak_prob": leak_prob,
                 "number_of_components": len(components),
-                "max_component": max(component_lengths),
-                "average_component": np.mean(component_lengths),
-                "mode": real
+                "max_component": max(comp_len),
+                "average_component": float(np.mean(comp_len)),
+                "mode": real,
             }
-            json.dump(res, open(os.path.join(ROOT_DIR, "results", f"{method.__name__}_{adoption_rate}_{dropout}_{attacker}_{victim}{'_full' if full_graph else ''}.json"), "w"))
+            out = os.path.join(ROOT_DIR, "results",
+                               f"{method.__name__}_{adoption_rate}_{dropout}_"
+                               f"{attacker}_{victim}_leak{leak_prob}"
+                               f"{'_full' if full_graph else ''}.json")
+            json.dump(res, open(out, "w"))
             all_results.append(res)
-            
+
     return pd.DataFrame(all_results)
 
 
-def get_deployments(allowed_methods: list[str], analysis_graph, directed_graph, dropouts: list | None = None):
-    TOP_100 = top_100(directed_graph, None)
-
-    possible_methods = [
-        real_world,
-        random_choice, 
-        cone_size,
-        degree_centrality, 
-        louvain_communities,
-        kernighan_lin_partition
-    ]
-    methods = []
-
-    for method in possible_methods:
-        if method.__name__ in allowed_methods:
-            methods.append(method)
-
-    adoption_rates = [
-        0.05,
-        0.1,
-        0.2,
-        0.3,
-        0.4,
-        0.5,
-        0.6,
-        0.7,
-        0.8,
-        0.9
-    ] 
-
-    deployments = []
-
-    for method in methods:
-        for adoption_rate in adoption_rates:
-            if method.__name__ == "real_world" and adoption_rate > 0.05:
-                continue
-            
-            if dropouts:
-                for dropout in dropouts:
-                    pkl_path = os.path.join(ROOT_DIR, "deployments", f"{method.__name__}_{adoption_rate}_{dropout}.pkl")
-                    if not os.path.exists(pkl_path):
-                        deployment = method(directed_graph, adoption_rate)
-                        stripped_deployment = set(deployment) - set(random.sample(TOP_100, dropout))
-                        pickle.dump(stripped_deployment, open(pkl_path, "wb"))
-                    
-                    deployments.append([
-                        method,
-                        adoption_rate,
-                        dropout
-                    ])
-            else:
-                pkl_path = os.path.join(ROOT_DIR, "deployments", f"{method.__name__}_{adoption_rate}_0.pkl")
-                if not os.path.exists(pkl_path):
-                    deployment = method(analysis_graph, adoption_rate)
-                    pickle.dump(deployment, open(pkl_path, "wb"))
-
-            deployments.append([
-                method,
-                adoption_rate,
-                0
-            ])
-
-    return deployments
+if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--methods", nargs="+", default=["random_choice"])
+    ap.add_argument("--rel-file", default=None)
+    ap.add_argument("--full-graph", action="store_true")
+    ap.add_argument("--leak-prob", type=float, default=0.0)
+    ap.add_argument("--leak-seed", type=int, default=0)
+    ap.add_argument("--mode", choices=["subprefix", "prefix"], default="subprefix")
+    args = ap.parse_args()
+    df = compute_impact(args.methods, rel_file=args.rel_file, full_graph=args.full_graph,
+                        leak_prob=args.leak_prob, leak_seed=args.leak_seed, mode=args.mode)
+    print(df.groupby(["method", "adoption_rate"])[["impact", "direct_impact", "indirect_impact"]].mean())

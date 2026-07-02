@@ -1,89 +1,80 @@
 import os
 import json
 import random
-import requests
+
 import numpy as np
 import pandas as pd
 import networkx as nx
 
 from .graph import create_graph
+
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Customer-cone sizes are computed lazily on first use so importing this module
+# does not require a caida.txt on disk.
+_CONE_SIZES = None
 
 
 def compute_cone(node, cones, graph):
-    neighbors = graph.successors(node)
-    neighbors = [n for n in neighbors if graph.get_edge_data(node, n).get("relationship") == 1]
-
     if node in cones:
         return cones[node]
-    
+    neighbors = [n for n in graph.successors(node)
+                 if graph.get_edge_data(node, n).get("relationship") == 1]
     cone = {node}
-
     for neighbor in neighbors:
-        if neighbor in cones:
-            cone |= cones[neighbor]
-        else:
-            cone |= compute_cone(neighbor, cones, graph)
-
+        cone |= cones.get(neighbor) or compute_cone(neighbor, cones, graph)
     cones[node] = cone
     return cone
 
 
-def compute_cone_sizes():
+def compute_cone_sizes(edge_file="caida.txt"):
     cones = {}
-    cone_sizes = {}
-    graph = create_graph(directed=True, special=True, edge_file="caida.txt")
-
+    graph = create_graph(directed=True, special=True, edge_file=edge_file)
+    import sys
+    sys.setrecursionlimit(1_000_000)
     for node in graph.nodes:
         compute_cone(node, cones, graph)
+    return {k: len(v) for k, v in cones.items()}
 
-    for key in cones:
-        cone_sizes[key] = len(cones[key])
 
-    return cone_sizes
-
-CONE_SIZES = compute_cone_sizes()
+def get_cone_sizes(edge_file="caida.txt"):
+    global _CONE_SIZES
+    if _CONE_SIZES is None:
+        _CONE_SIZES = compute_cone_sizes(edge_file)
+    return _CONE_SIZES
 
 
 def top_100(graph, rate):
-    return sorted(graph.nodes, key=lambda x: CONE_SIZES[x], reverse=True)[:100]
+    cs = get_cone_sizes()
+    return sorted(graph.nodes, key=lambda x: cs.get(x, 0), reverse=True)[:100]
 
 
 def real_world(graph, rate):
-    link_template = 'https://api.rovista.netsecurelab.org/rovista/api/overview?offset={offset}&count={count}&sortBy=rank&sortOrder=asc&searchBy=ASN'
-
-    offset = 0
-    count = 50000
-
-    data = []
-
+    import requests
+    link = ('https://api.rovista.netsecurelab.org/rovista/api/overview'
+            '?offset={offset}&count={count}&sortBy=rank&sortOrder=asc&searchBy=ASN')
+    offset, count, data = 0, 50000, []
     while True:
         try:
-            response = requests.get(link_template.format(offset=offset, count=count))
-            data += response.json()["data"]
-            if len(response.json()["data"]) < count:
+            resp = requests.get(link.format(offset=offset, count=count))
+            page = resp.json()["data"]
+            data += page
+            if len(page) < count:
                 break
         except requests.exceptions.RequestException as e:
             print(f"Request failed: {e}")
             break
         offset += count
-
-    return list(map(lambda x: x["asn"], filter(lambda x: x["ratio"] > 0, data)))
+    return [x["asn"] for x in data if x["ratio"] > 0]
 
 
 def cone_size(graph, adoption_rate):
+    cs = get_cone_sizes()
     n = round(adoption_rate * len(graph.nodes))
-    return sorted(list(graph.nodes), key=lambda x: CONE_SIZES[x], reverse=True)[:n]
+    return sorted(list(graph.nodes), key=lambda x: cs.get(x, 0), reverse=True)[:n]
 
 
-def special_deployment(graph, n):
-    return nx.node_boundary(graph, [node for node in graph.nodes if graph.nodes[node]["type"] == "tier-1"])
-
-
-def random_choice(
-        graph: nx.Graph, 
-        adoption_rate: float
-    ):
+def random_choice(graph, adoption_rate):
     n = round(adoption_rate * len(graph.nodes))
     return random.sample(list(graph.nodes), n)
 
@@ -91,49 +82,39 @@ def random_choice(
 def degree_centrality(graph, adoption_rate):
     n = round(adoption_rate * len(graph.nodes))
     deployment = set()
-    
     while len(deployment) < n:
         degrees = nx.degree_centrality(graph.subgraph(graph.nodes - deployment))
         deployment.add(max(degrees, key=lambda x: degrees[x]))
-    
     return deployment
 
 
 def kernighan_lin_partition(graph, adoption_rate):
     if adoption_rate == 0:
         return []
-    
-    last = None
-    parts = 2
+    last, parts = None, 2
     n = round(adoption_rate * len(graph.nodes))
-    
     partition = [graph.nodes]
-
     while True:
         if len(partition) > parts:
             partition = [graph.nodes]
-        
         while len(partition) < parts:
             new_partition = []
             for part in partition:
                 new_partition.extend(list(nx.community.kernighan_lin_bisection(graph.subgraph(part))))
             partition = new_partition
-
         if last is None and parts > 2:
             for part in partition:
-                boundary1 = nx.node_boundary(graph, part)
-                boundary2 = nx.node_boundary(graph, graph.nodes - part)
-
-                boundary = boundary1 if len(boundary1) < len(boundary2) else boundary2
+                b1 = nx.node_boundary(graph, part)
+                b2 = nx.node_boundary(graph, graph.nodes - part)
+                boundary = b1 if len(b1) < len(b2) else b2
                 if len(boundary) < n:
-                    return boundary | set(np.random.choice(list(graph.nodes - boundary), abs(n - len(boundary)), replace=False))
-                
+                    return boundary | set(np.random.choice(list(graph.nodes - boundary),
+                                          abs(n - len(boundary)), replace=False))
             parts *= 2
         elif parts == 2:
-            boundary1 = nx.node_boundary(graph, partition[0])
-            boundary2 = nx.node_boundary(graph, partition[1])
-
-            boundary = boundary1 if len(boundary1) < len(boundary2) else boundary2
+            b1 = nx.node_boundary(graph, partition[0])
+            b2 = nx.node_boundary(graph, partition[1])
+            boundary = b1 if len(b1) < len(b2) else b2
             if len(boundary) < n:
                 last = boundary
             parts *= 2
@@ -142,152 +123,73 @@ def kernighan_lin_partition(graph, adoption_rate):
             for part in partition:
                 b1 = nx.node_boundary(graph, part) | boundary
                 b2 = nx.node_boundary(graph, graph.nodes - part) | boundary
-
                 boundary = b1 if len(b1) < len(b2) else b2
             if len(boundary) < n and parts < len(graph.nodes) / 4:
                 last = boundary
                 parts *= 2
             else:
-                return last | set(np.random.choice(list(graph.nodes - last), abs(n - len(last)), replace=False))
+                return last | set(np.random.choice(list(graph.nodes - last),
+                                  abs(n - len(last)), replace=False))
 
-
-# def metis_partition(graph, adoption_rate):
-#     if adoption_rate == 0:
-#         return []
-    
-#     last = None
-#     parts = 2
-#     n = round(adoption_rate * len(graph.nodes))
-    
-#     while True:
-#         cuts, partition = metis.part_graph(graph, parts)
-#         partitions = [set(np.where(np.array(partition) == i)[0]) for i in range(parts)]
-
-#         if last is None and parts > 2:
-#             for part in partitions:
-#                 boundary1 = nx.node_boundary(graph, graph.nodes - part)
-#                 boundary2 = nx.node_boundary(graph, part)
-
-#                 boundary = boundary1 if len(boundary1) < len(boundary2) else boundary2
-#                 if len(boundary) < n:
-#                     return boundary
-                
-#             parts *= 2
-#         elif parts == 2:
-#             boundary1 = nx.node_boundary(graph, graph.nodes - partitions[0])
-#             boundary2 = nx.node_boundary(graph, partitions[0])
-
-#             boundary = boundary1 if len(boundary1) < len(boundary2) else boundary2
-
-            
-#             if len(boundary) < n:
-#                 last = boundary
-#             parts *= 2
-#         else:
-#             boundary = set()
-#             for part in partitions:
-#                 b1 = nx.node_boundary(graph, graph.nodes - part) | boundary
-#                 b2 = nx.node_boundary(graph, part) | boundary
-
-#                 boundary = b1 if len(b1) < len(b2) else b2
-#             if len(boundary) < n and parts < len(graph.nodes) / 4:
-#                 last = boundary
-#                 parts *= 2
-#             else:
-#                 return last
-            
 
 def compute_subsets(graph):
-    possible_subsets = []
-
+    rows = []
     for partition in nx.community.louvain_partitions(graph):
         for community in partition:
-            inner_boundary = nx.node_boundary(graph, graph.nodes - community, community)
-            outer_boundary = nx.node_boundary(graph, community)
-            possible_subsets.append({
-                "subset": community,
-                "number_of_members": len(community),
-                "inner_boundary": inner_boundary,
-                "inner_boundary_length": len(inner_boundary),
-                "outer_boundary": outer_boundary,
-                "outer_boundary_length": len(outer_boundary) 
-            })
+            inner = nx.node_boundary(graph, graph.nodes - community, community)
+            outer = nx.node_boundary(graph, community)
+            rows.append({"subset": community, "number_of_members": len(community),
+                         "inner_boundary": inner, "inner_boundary_length": len(inner),
+                         "outer_boundary": outer, "outer_boundary_length": len(outer)})
+    return pd.DataFrame(rows).sort_values(by="number_of_members", ascending=False)
 
-    subset_df = pd.DataFrame(possible_subsets)
-    subset_df = subset_df.sort_values(by="number_of_members", ascending=False)
-
-    return subset_df
 
 def louvain_communities(graph, adoption_rate):
     if adoption_rate == 0:
         return []
-    
     n = round(adoption_rate * len(graph.nodes))
     subset_df = compute_subsets(graph)
     current_partition = [set(graph.nodes)]
     current_boundary = set()
-
-    final = []
-
     while current_partition:
-        subset_df = subset_df[(subset_df.inner_boundary_length < (n - len(current_boundary))) | (subset_df.outer_boundary_length < (n - len(current_boundary)))]
-        for idx, row in subset_df[(subset_df.inner_boundary_length == 0) | (subset_df.outer_boundary_length == 0)].iterrows():
+        subset_df = subset_df[(subset_df.inner_boundary_length < (n - len(current_boundary))) |
+                              (subset_df.outer_boundary_length < (n - len(current_boundary)))]
+        for idx, row in subset_df[(subset_df.inner_boundary_length == 0) |
+                                  (subset_df.outer_boundary_length == 0)].iterrows():
             current_partition.append(row["subset"])
             current_partition[[row["subset"] <= x for x in current_partition].index(True)] -= row["subset"]
             subset_df.drop(idx, axis=0, inplace=True)
-        
-        biggest_partition = max(current_partition, key=len)
-
-        candidates = subset_df[subset_df.subset < biggest_partition]
+        biggest = max(current_partition, key=len)
+        candidates = subset_df[subset_df.subset < biggest]
         if len(candidates) == 1:
             try:
-                new_subset_df = compute_subsets(graph.subgraph(biggest_partition))
+                new_df = compute_subsets(graph.subgraph(biggest))
             except Exception:
-                new_subset_df = None
-
-            if new_subset_df is None or len(new_subset_df) < 2:
-                final.append(biggest_partition)
-                idx = current_partition.index(biggest_partition)
-                del current_partition[idx]
+                new_df = None
+            if new_df is None or len(new_df) < 2:
+                final_big = biggest
+                del current_partition[current_partition.index(final_big)]
                 continue
-            else:
-                subset_df = pd.concat([subset_df, new_subset_df], ignore_index=True)
-                subset_df = subset_df.sort_values(by=["number_of_members"], ascending=False).reset_index(drop=True)
-                candidates = subset_df
-
-        new_subset = None
-        for idx, subset in candidates[candidates.number_of_members < (len(biggest_partition) / 2)].iterrows():
+            subset_df = pd.concat([subset_df, new_df], ignore_index=True)
+            subset_df = subset_df.sort_values(by=["number_of_members"], ascending=False).reset_index(drop=True)
+            candidates = subset_df
+        new_subset, boundary = None, set()
+        for idx, subset in candidates[candidates.number_of_members < (len(biggest) / 2)].iterrows():
             boundary = subset["inner_boundary"] if subset["inner_boundary_length"] < subset["outer_boundary_length"] else subset["outer_boundary"]
-
             if len(boundary) < (n - len(current_boundary)):
                 new_subset = subset
                 subset_df.drop(idx, axis=0, inplace=True)
                 break
-
         if new_subset is None:
-            idx = current_partition.index(biggest_partition)
-            final.append(biggest_partition)
-            del current_partition[idx]
+            del current_partition[current_partition.index(biggest)]
             continue
-
-            
-        idx = current_partition.index(biggest_partition)
+        idx = current_partition.index(biggest)
         current_partition[idx] -= new_subset["subset"]
         current_partition.append(new_subset["subset"])
         current_boundary |= boundary
-
-        subset_df["inner_boundary"] = subset_df.inner_boundary.apply(lambda x: x - boundary)
-        subset_df["inner_boundary_length"] = subset_df.inner_boundary.apply(len)
-        subset_df["outer_boundary"] = subset_df.outer_boundary.apply(lambda x: x - boundary)
-        subset_df["outer_boundary_length"] = subset_df.outer_boundary.apply(len)
-
-    return current_boundary | set(random.sample(list(set(graph.nodes) - current_boundary), n - len(current_boundary)))
-
-
-def node_betweenness(graph, adoption_rate):
-    n = round(adoption_rate * len(graph.nodes))
-
-    counts = json.load(open(os.path.join(ROOT_DIR, "results", "reachable_nodes_count.json"), "r"))
-    sorted_nodes = sorted(graph.nodes, key=lambda x: counts[str(x)] if str(x) in counts else 0, reverse=True)
-
-    return sorted_nodes[:n]
+        for col, bl in (("inner_boundary", "inner_boundary_length"),
+                        ("outer_boundary", "outer_boundary_length")):
+            subset_df[col] = subset_df[col].apply(lambda x: x - boundary)
+            subset_df[bl] = subset_df[col].apply(len)
+    return current_boundary | set(random.sample(list(set(graph.nodes) - current_boundary),
+                                  n - len(current_boundary)))
